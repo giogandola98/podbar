@@ -93,6 +93,8 @@ struct App {
     /// volume before conversational awareness lowered it
     ca_volume: Option<u32>,
     low_warned: bool,
+    /// other devices (mice, keyboards) already warned about a low battery
+    low_warned_devs: Vec<String>,
 }
 
 fn config_path() -> Option<std::path::PathBuf> {
@@ -173,6 +175,7 @@ impl App {
                 self.snap = Snapshot::default();
             }
         }
+        self.check_batteries();
         let target = self.snap.devices.iter().find(|d| d.connected && d.aap).map(|d| d.address.clone());
         if let Some(link) = &self.link {
             if target.as_deref() != Some(link.address.as_str()) {
@@ -190,6 +193,23 @@ impl App {
             self.connecting = Some(addr.clone());
             self.last_attempt = Some((addr.clone(), Instant::now()));
             aap::spawn(addr, self.tx.clone());
+        }
+    }
+
+    /// Low battery warning for devices that report it through BlueZ (Battery1);
+    /// the AirPods have their own, from AAP.
+    fn check_batteries(&mut self) {
+        for d in self.snap.devices.iter().filter(|d| d.connected && !d.aap) {
+            let Some(b) = d.battery else { continue };
+            let warned = self.low_warned_devs.iter().position(|a| *a == d.address);
+            if b <= LOW_BATTERY && warned.is_none() {
+                self.low_warned_devs.push(d.address.clone());
+                let name = if d.name.is_empty() { d.address.clone() } else { d.name.clone() };
+                let (body, session) = (format!("{name}: {b}%"), self.session.clone());
+                tokio::spawn(async move { notify::send(&session, "battery-low", t().low_battery, &body).await });
+            } else if let Some(i) = warned.filter(|_| b > LOW_BATTERY + 10) {
+                self.low_warned_devs.remove(i);
+            }
         }
     }
 
@@ -507,6 +527,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         profile_off: None,
         ca_volume: None,
         low_warned: false,
+        low_warned_devs: Vec::new(),
     };
     app.refresh().await;
     let mut shown: Option<View> = None;

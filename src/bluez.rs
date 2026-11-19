@@ -144,7 +144,18 @@ pub async fn disconnect(conn: &Connection, dev: &str) -> zbus::Result<()> {
 pub async fn pair(conn: &Connection, dev: &str) -> zbus::Result<()> {
     call(conn, dev, "org.bluez.Device1", "Pair").await?;
     set_prop(conn, dev, "org.bluez.Device1", "Trusted", true).await?;
-    connect(conn, dev).await
+    // LE mice and keyboards are usually connected by the pairing itself
+    if is_connected(conn, dev).await {
+        return Ok(());
+    }
+    match connect(conn, dev).await {
+        Err(zbus::Error::MethodError(name, _, _))
+            if matches!(name.as_str(), "org.bluez.Error.AlreadyConnected" | "org.bluez.Error.InProgress") =>
+        {
+            Ok(())
+        }
+        r => r,
+    }
 }
 
 pub async fn remove(conn: &Connection, adapter: &str, dev: &str) -> zbus::Result<()> {
@@ -176,6 +187,10 @@ async fn device_prop(conn: &Connection, dev: &str, name: &str) -> Option<OwnedVa
 
 pub async fn is_paired(conn: &Connection, dev: &str) -> bool {
     device_prop(conn, dev, "Paired").await.and_then(|v| bool::try_from(&v).ok()).unwrap_or(false)
+}
+
+pub async fn is_connected(conn: &Connection, dev: &str) -> bool {
+    device_prop(conn, dev, "Connected").await.and_then(|v| bool::try_from(&v).ok()).unwrap_or(false)
 }
 
 pub async fn alias(conn: &Connection, dev: &str) -> String {
