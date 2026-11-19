@@ -1,0 +1,24 @@
+[package]
+name = "podbar"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Lightweight Bluetooth tray for Wayland bars, with AirPods battery, noise control and ear detection"
+repository = "https://github.com/giogandola98/podbar"
+readme = "README.md"
+keywords = ["bluetooth", "airpods", "tray", "wayland", "bluez"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+ksni = "0.3.7"
+zbus = { version = "5.19", default-features = false, features = ["tokio"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "process"] }
+futures-util = { version = "0.3", default-features = false }
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
