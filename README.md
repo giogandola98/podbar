@@ -9,11 +9,12 @@ a separate AirPods app.
   (no window, no second icon).
 - **Devices.** Connect or disconnect paired devices with one click. Each one
   shows its battery level when BlueZ knows it.
-- **Pairing.** *Add device* scans for 60 s and pairs, trusts and connects the
-  device you pick. Pairing codes appear as notifications. podbar is the BlueZ
+- **Pairing.** Opening the *Add device* submenu starts a scan that stops
+  when the submenu closes. Picking a device pairs, trusts and connects it. Pairing codes appear as notifications. podbar is the BlueZ
   agent, and it only accepts pairing requests that you started from the menu.
-- **AirPods.** This section only appears while AirPods are connected:
-  - battery for each bud and the case (in the menu and the tooltip)
+- **AirPods.** Their row is a submenu. Its controls appear while the AirPods
+  are connected, and the main menu keeps its height:
+  - battery for each bud and the case (in the submenu and the tooltip)
   - noise control: off, transparency, adaptive, noise cancellation
   - conversational awareness
   - ear detection: pauses MPRIS players when a bud comes out, resumes when
@@ -67,3 +68,8 @@ LibrePods' phone relay or hearing-aid features.
 ## License
 
 GPL-3.0-or-later.
+
+`vendor/ksni` is [ksni](https://github.com/iovxw/ksni) 0.3.7 (Unlicense) with
+two small changes: submenu `opened`/`closed` events reach the tray
+(`Tray::submenu_toggled`), and separators can be hidden
+(`MenuItem::SeparatorIf`).

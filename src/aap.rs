@@ -30,6 +30,9 @@ const CA_DATA: &[u8] = &[0x04, 0x00, 0x04, 0x00, 0x4b, 0x00, 0x02, 0x00, 0x01];
 
 const ID_NOISE: u8 = 0x0d;
 const ID_CA: u8 = 0x28;
+/// "Allow Off option" (1 = allowed): without it the AirPods refuse the Off
+/// noise mode and pick another one (LibrePods: AllowOffOption)
+const ID_ALLOW_OFF: u8 = 0x34;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Noise {
@@ -337,6 +340,7 @@ pub fn spawn<E: From<Event> + Send + 'static>(address: String, tx: UnboundedSend
                 }
                 Some(Msg::FeaturesAck) => {
                     link.send(REQUEST_NOTIFICATIONS);
+                    link.send(&control(ID_ALLOW_OFF, 1));
                 }
                 _ => {}
             }

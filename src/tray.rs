@@ -69,120 +69,144 @@ fn device_icon(d: &Device) -> String {
     }
 }
 
+/// Rows reserved for devices found by a search. The menu keeps a fixed
+/// layout and only toggles visibility: a layout change makes the host rebuild
+/// the menu (badly, while it is open) and renumbers every item.
+const FOUND_SLOTS: usize = 15;
+
 impl PodTray {
     fn send(&self, c: Cmd) {
         let _ = self.tx.send(Ev::Cmd(c));
     }
 
-    fn pods_section(&self, p: &Pods) -> Vec<MenuItem<Self>> {
-        let mut items: Vec<MenuItem<Self>> = vec![StandardItem {
-            label: p.name.clone(),
-            icon_name: "audio-headphones".into(),
-            ..Default::default()
+    fn row_label(&self, d: &Device) -> String {
+        let mut label = display_name(d);
+        let pods_battery = self.pods_of(d).and_then(|p| p.min_level());
+        if let Some(b) = pods_battery.or(d.battery) {
+            label.push_str(&format!("  ·  {b}%"));
         }
-        .into()];
-        let battery = battery_line(p);
-        if !battery.is_empty() {
-            items.push(StandardItem { label: battery, ..Default::default() }.into());
+        label
+    }
+
+    fn pods_of(&self, d: &Device) -> Option<&Pods> {
+        self.view.pods.as_ref().filter(|p| p.address == d.address)
+    }
+
+    fn connect_toggle(d: &Device) -> Box<dyn Fn(&mut Self) + Send> {
+        let path = d.path.clone();
+        let connected = d.connected;
+        Box::new(move |this: &mut Self| {
+            this.send(if connected { Cmd::Disconnect(path.clone()) } else { Cmd::Connect(path.clone()) })
+        })
+    }
+
+    /// A paired device: a checkmark row that connects or disconnects it.
+    /// AirPods get a submenu instead, with their controls inside: the main
+    /// menu then keeps its height when they connect. GTK cannot grow a popup
+    /// that is already shown on Wayland, it would turn it into a scrolled one.
+    fn device_item(&self, d: &Device, powered: bool) -> MenuItem<Self> {
+        if !d.aap {
+            return CheckmarkItem {
+                label: self.row_label(d),
+                checked: d.connected,
+                icon_name: device_icon(d),
+                visible: powered,
+                activate: Self::connect_toggle(d),
+                ..Default::default()
+            }
+            .into();
         }
-        if let Some(current) = p.noise {
-            items.push(MenuItem::Separator);
-            items.push(
-                RadioGroup {
-                    selected: Noise::ALL.iter().position(|&n| n == current).unwrap_or(0),
-                    select: Box::new(|this: &mut Self, i| {
-                        if let Some(&n) = Noise::ALL.get(i) {
-                            this.send(Cmd::Noise(n));
-                        }
-                    }),
-                    options: Noise::ALL
-                        .iter()
-                        .map(|&n| RadioItem { label: noise_label(n).into(), ..Default::default() })
-                        .collect(),
-                }
-                .into(),
-            );
-        }
-        items.push(MenuItem::Separator);
-        if let Some(ca) = p.ca {
-            items.push(
-                CheckmarkItem {
-                    label: t().conversational.into(),
-                    checked: ca,
-                    activate: Box::new(move |this: &mut Self| this.send(Cmd::Ca(!ca))),
-                    ..Default::default()
-                }
-                .into(),
-            );
-        }
+        // Always the same items; `p` decides which of them are visible.
+        let p = self.pods_of(d);
+        let shown = p.is_some();
+        let battery = p.map(battery_line).unwrap_or_default();
+        let noise = p.and_then(|p| p.noise);
+        let ca = p.and_then(|p| p.ca);
         let ear = self.view.ear_detection;
-        items.push(
+        let submenu = vec![
+            CheckmarkItem {
+                label: t().connected.into(),
+                checked: d.connected,
+                activate: Self::connect_toggle(d),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem { label: battery.clone(), enabled: false, visible: !battery.is_empty(), ..Default::default() }
+                .into(),
+            MenuItem::SeparatorIf(noise.is_some()),
+            RadioGroup {
+                selected: noise.and_then(|c| Noise::ALL.iter().position(|&n| n == c)).unwrap_or(0),
+                select: Box::new(|this: &mut Self, i| {
+                    if let Some(&n) = Noise::ALL.get(i) {
+                        this.send(Cmd::Noise(n));
+                    }
+                }),
+                options: Noise::ALL
+                    .iter()
+                    .map(|&n| RadioItem { label: noise_label(n).into(), visible: noise.is_some(), ..Default::default() })
+                    .collect(),
+            }
+            .into(),
+            MenuItem::SeparatorIf(shown),
+            CheckmarkItem {
+                label: t().conversational.into(),
+                checked: ca == Some(true),
+                visible: ca.is_some(),
+                activate: Box::new(move |this: &mut Self| this.send(Cmd::Ca(ca != Some(true)))),
+                ..Default::default()
+            }
+            .into(),
             CheckmarkItem {
                 label: t().ear_detection.into(),
                 checked: ear,
+                visible: shown,
                 activate: Box::new(move |this: &mut Self| this.send(Cmd::EarDetection(!ear))),
                 ..Default::default()
             }
             .into(),
-        );
-        items.push(MenuItem::Separator);
-        items
+        ];
+        SubMenu { label: self.row_label(d), icon_name: device_icon(d), submenu, visible: powered, ..Default::default() }
+            .into()
     }
 
-    fn device_item(&self, d: &Device) -> MenuItem<Self> {
-        let mut label = display_name(d);
-        let pods_battery = self.view.pods.as_ref().filter(|p| p.address == d.address).and_then(|p| p.min_level());
-        if let Some(b) = pods_battery.or(d.battery) {
-            label.push_str(&format!("  ·  {b}%"));
+    fn add_menu(&self, powered: bool) -> MenuItem<Self> {
+        let mut found: Vec<&Device> =
+            self.view.snap.devices.iter().filter(|d| !d.paired && !d.name.is_empty() && d.rssi.is_some()).collect();
+        // strongest signals first, then shown by name: rows that move while
+        // the pointer is on them get clicked by mistake
+        found.sort_by_key(|d| std::cmp::Reverse(d.rssi));
+        found.truncate(FOUND_SLOTS);
+        found.sort_by_key(|d| display_name(d).to_lowercase());
+        // Searching starts when this submenu opens and stops when it closes,
+        // so there is no button: the header never changes while it is open.
+        let mut sub: Vec<MenuItem<Self>> =
+            vec![StandardItem { label: t().searching.into(), enabled: false, ..Default::default() }.into()];
+        for i in 0..FOUND_SLOTS {
+            sub.push(match found.get(i) {
+                Some(d) => {
+                    let path = d.path.clone();
+                    StandardItem {
+                        label: display_name(d),
+                        icon_name: device_icon(d),
+                        activate: Box::new(move |this: &mut Self| this.send(Cmd::Pair(path.clone()))),
+                        ..Default::default()
+                    }
+                    .into()
+                }
+                None => StandardItem { visible: false, ..Default::default() }.into(),
+            });
         }
-        let path = d.path.clone();
-        let connected = d.connected;
-        CheckmarkItem {
-            label,
-            checked: connected,
-            icon_name: device_icon(d),
-            activate: Box::new(move |this: &mut Self| {
-                this.send(if connected { Cmd::Disconnect(path.clone()) } else { Cmd::Connect(path.clone()) })
-            }),
+        SubMenu {
+            label: t().add_device.into(),
+            icon_name: "list-add".into(),
+            submenu: sub,
+            visible: powered,
             ..Default::default()
         }
         .into()
     }
 
-    fn add_menu(&self, discovering: bool) -> MenuItem<Self> {
-        let mut sub: Vec<MenuItem<Self>> = vec![StandardItem {
-            label: if discovering { t().stop_search } else { t().search }.into(),
-            icon_name: "edit-find".into(),
-            activate: Box::new(move |this: &mut Self| this.send(Cmd::Scan(!discovering))),
-            ..Default::default()
-        }
-        .into()];
-        let mut found: Vec<&Device> =
-            self.view.snap.devices.iter().filter(|d| !d.paired && !d.name.is_empty() && d.rssi.is_some()).collect();
-        found.sort_by_key(|d| std::cmp::Reverse(d.rssi));
-        if discovering || !found.is_empty() {
-            sub.push(MenuItem::Separator);
-        }
-        if found.is_empty() && discovering {
-            sub.push(StandardItem { label: t().searching.into(), enabled: false, ..Default::default() }.into());
-        }
-        for d in found.into_iter().take(15) {
-            let path = d.path.clone();
-            sub.push(
-                StandardItem {
-                    label: display_name(d),
-                    icon_name: device_icon(d),
-                    activate: Box::new(move |this: &mut Self| this.send(Cmd::Pair(path.clone()))),
-                    ..Default::default()
-                }
-                .into(),
-            );
-        }
-        SubMenu { label: t().add_device.into(), icon_name: "list-add".into(), submenu: sub, ..Default::default() }
-            .into()
-    }
-
-    fn remove_menu(&self, paired: &[&Device]) -> MenuItem<Self> {
+    fn remove_menu(&self, paired: &[&Device], powered: bool) -> MenuItem<Self> {
         let sub = paired
             .iter()
             .map(|d| {
@@ -201,6 +225,7 @@ impl PodTray {
             icon_name: "list-remove".into(),
             submenu: sub,
             enabled: !paired.is_empty(),
+            visible: powered,
             ..Default::default()
         }
         .into()
@@ -265,24 +290,33 @@ impl ksni::Tray for PodTray {
                 ..Default::default()
             }
             .into(),
-            MenuItem::Separator,
+            MenuItem::SeparatorIf(powered),
         ];
-        if !powered {
-            return items;
-        }
-        if let Some(p) = &self.view.pods {
-            items.extend(self.pods_section(p));
-        }
         let paired: Vec<&Device> = self.view.snap.devices.iter().filter(|d| d.paired).collect();
-        if paired.is_empty() {
-            items.push(StandardItem { label: t().no_devices.into(), enabled: false, ..Default::default() }.into());
-        }
+        items.push(
+            StandardItem {
+                label: t().no_devices.into(),
+                enabled: false,
+                visible: powered && paired.is_empty(),
+                ..Default::default()
+            }
+            .into(),
+        );
         for d in &paired {
-            items.push(self.device_item(d));
+            items.push(self.device_item(d, powered));
         }
-        items.push(MenuItem::Separator);
-        items.push(self.add_menu(adapter.discovering));
-        items.push(self.remove_menu(&paired));
+        items.push(MenuItem::SeparatorIf(powered));
+        items.push(self.add_menu(powered));
+        items.push(self.remove_menu(&paired, powered));
         items
+    }
+
+    /// Opening "Add device" starts a search, closing it stops the search:
+    /// clicking an item would close the menu, so the search has no button to
+    /// wait for.
+    fn submenu_toggled(&mut self, label: &str, opened: bool) {
+        if label == t().add_device {
+            self.send(Cmd::AutoScan(opened));
+        }
     }
 }

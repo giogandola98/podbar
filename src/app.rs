@@ -18,7 +18,8 @@ use crate::text::t;
 use crate::tray::{battery_line, PodTray, View};
 use crate::{agent, media, notify};
 
-const SCAN_SECS: u64 = 60;
+const SCAN_SECS: u64 = 120;
+const AUTO_SCAN_STOP_SECS: u64 = 3;
 const PAIR_WINDOW_SECS: u64 = 60;
 const AAP_RETRY: Duration = Duration::from_secs(20);
 const LOW_BATTERY: u8 = 10;
@@ -30,6 +31,10 @@ pub enum Cmd {
     Pair(String),
     Remove(String),
     Scan(bool),
+    /// the "Add device" submenu opened (`true`) or closed: search while it is
+    /// open, stop a moment after it closes (hovering across the menu closes
+    /// and reopens it quickly)
+    AutoScan(bool),
     Noise(Noise),
     Ca(bool),
     EarDetection(bool),
@@ -155,6 +160,15 @@ impl App {
     }
 
     /// Runs a BlueZ call in the background; failures become a notification.
+    /// Stops the search after `secs`, unless a newer scan command came first.
+    fn scan_stop_in(&self, secs: u64) {
+        let (tx, gen) = (self.tx.clone(), self.scan_gen);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(secs)).await;
+            let _ = tx.send(Ev::ScanTimeout(gen));
+        });
+    }
+
     fn background<F>(&self, failure: &'static str, name: String, fut: F)
     where
         F: std::future::Future<Output = zbus::Result<()>> + Send + 'static,
@@ -270,18 +284,21 @@ impl App {
                 let name = self.device_name(&dev);
                 self.background(t().connect_failed, name, async move { bluez::remove(&sys, &adapter, &dev).await });
             }
-            Cmd::Scan(on) => {
+            Cmd::AutoScan(false) => {
+                self.scan_gen += 1;
+                self.scan_stop_in(AUTO_SCAN_STOP_SECS);
+            }
+            Cmd::Scan(on) | Cmd::AutoScan(on @ true) => {
                 self.scan_gen += 1;
                 if on {
-                    let (tx, gen) = (self.tx.clone(), self.scan_gen);
-                    tokio::spawn(async move {
-                        tokio::time::sleep(Duration::from_secs(SCAN_SECS)).await;
-                        let _ = tx.send(Ev::ScanTimeout(gen));
+                    self.scan_stop_in(SCAN_SECS);
+                }
+                // BlueZ answers an error to a start while searching, or a stop while idle
+                if on != self.snap.adapter.as_ref().is_some_and(|a| a.discovering) {
+                    self.background(t().connect_failed, t().bluetooth.into(), async move {
+                        bluez::discovery(&sys, &adapter, on).await
                     });
                 }
-                self.background(t().connect_failed, t().bluetooth.into(), async move {
-                    bluez::discovery(&sys, &adapter, on).await
-                });
             }
             Cmd::Noise(n) => {
                 if let (Some(link), Some(p)) = (&self.link, &mut self.pods) {
