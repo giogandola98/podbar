@@ -22,3 +22,11 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# ksni 0.3.7 with a small patch: submenu opened/closed events reach the tray
+# (see vendor/ksni/src/service.rs, Tray::submenu_toggled)
+[patch.crates-io]
+ksni = { path = "vendor/ksni" }
+
+[workspace]
+exclude = ["vendor"]
