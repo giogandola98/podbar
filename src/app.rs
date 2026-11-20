@@ -510,7 +510,12 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
-    let tray = PodTray { view: View::default(), tx: tx.clone() }.spawn().await?;
+    // At login podbar starts together with waybar: wait for the
+    // StatusNotifierWatcher instead of exiting if it is not up yet.
+    let tray = PodTray { view: View::default(), tx: tx.clone() }
+        .assume_sni_available(true)
+        .spawn()
+        .await?;
     let mut app = App {
         sys,
         session,
